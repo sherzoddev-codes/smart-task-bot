@@ -2,7 +2,7 @@ import os
 import sqlite3
 import threading
 from flask import Flask
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -10,14 +10,13 @@ from telegram.ext import (
     filters,
     ContextTypes,
     ConversationHandler,
-    CallbackQueryHandler,
 )
 
 # --- FLASK (Render uchun veb-server) ---
 web_app = Flask(__name__)
 @web_app.route('/')
 def index():
-    return "Smart Task Ultimate Bot is running!", 200
+    return "Smart Task Bot is running!", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -31,7 +30,6 @@ def init_db():
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT, 
             user_id INTEGER, 
-            category TEXT,
             task TEXT, 
             status TEXT
         )
@@ -41,11 +39,11 @@ def init_db():
 
 init_db()
 
-# Holatlar (States)
+# Holatlar
 WAITING_FOR_TASK = 1
-WAITING_FOR_DONE_ID = 2
-WAITING_FOR_UPDATE_ID = 3
-WAITING_FOR_UPDATE_TEXT = 4
+WAITING_FOR_UPDATE_ID = 2
+WAITING_FOR_UPDATE_TEXT = 3
+WAITING_FOR_DONE_ID = 4
 
 # --- BOT MENYUSI ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -55,51 +53,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ["📊 Statistika", "🗑 Hammasini tozalash"]
     ]
     await update.message.reply_text(
-        "👋 **Smart Task Ultimate Bot**ga xush kelibsiz!\n"
-        "Kategoriyalar va vazifalaringizni qulay boshqaring.", 
+        "👋 **Smart Task Bot**ga xush kelibsiz!\n"
+        "Vazifangizni va vaqtini erkin yozib qoldirishingiz mumkin.", 
         reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True),
         parse_mode="Markdown"
     )
     return ConversationHandler.END
 
-# --- 1. KATEGORIYA TANLAB VAZIFA QO'SHISH ---
+# 1. Vazifa qo'shish (Erkin matn va vaqt)
 async def add_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [
-        [InlineKeyboardButton("📚 O'qish", callback_data="cat_O'qish")],
-        [InlineKeyboardButton("💻 Dasturlash", callback_data="cat_Dasturlash")],
-        [InlineKeyboardButton("🛡 Kiberxavfsizlik", callback_data="cat_Kiberxavfsizlik")],
-        [InlineKeyboardButton("👤 Shaxsiy", callback_data="cat_Shaxsiy")]
-    ]
-    await update.message.reply_text("📁 Vazifa uchun **kategoriyani** tanlang:", reply_markup=InlineKeyboardMarkup(kb))
-    return ConversationHandler.END
-
-async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    category = query.data.replace("cat_", "")
-    context.user_data['selected_category'] = category
-    
-    await query.message.reply_text(f"📝 Tanlangan kategoriya: **{category}**\n\nEndi vazifa matnini (vaqti bilan birga) yuboring:")
+    await update.message.reply_text("📝 Vazifangiz va vaqtini yozib yuboring\n*(Masalan: Dasturlash 17:00 da yoki Ingliz tili soat 19:00)*:")
     return WAITING_FOR_TASK
 
 async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     task_text = update.message.text
-    category = context.user_data.get('selected_category', 'Umumiy')
     user_id = update.effective_user.id
     
     conn = sqlite3.connect('tasks.db')
-    conn.execute("INSERT INTO tasks (user_id, category, task, status) VALUES (?, ?, ?, ?)", (user_id, category, task_text, "pending"))
+    conn.execute("INSERT INTO tasks (user_id, task, status) VALUES (?, ?, ?)", (user_id, task_text, "pending"))
     conn.commit()
     conn.close()
     
-    await update.message.reply_text(f"✅ Vazifa muvaffaqiyatli qo'shildi!\n📁 Kategoriya: *{category}*", parse_mode="Markdown")
+    await update.message.reply_text("✅ Vazifa muvaffaqiyatli ro'yxatga qo'shildi!")
     return ConversationHandler.END
 
-# --- 2. RO'YXATNI KO'RISH (KATEGORIYALAR BILAN) ---
+# 2. Ro'yxatni ko'rish
 async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conn = sqlite3.connect('tasks.db')
-    tasks = conn.execute("SELECT id, category, task FROM tasks WHERE user_id = ? AND status = 'pending'", (user_id,)).fetchall()
+    tasks = conn.execute("SELECT id, task FROM tasks WHERE user_id = ? AND status = 'pending'", (user_id,)).fetchall()
     conn.close()
     
     if not tasks:
@@ -107,11 +89,11 @@ async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         text = "📋 **Sizning vazifalaringiz:**\n\n"
         for t in tasks:
-            text += f"🔹 **ID: {t[0]}** | [{t[1]}] — {t[2]}\n"
-        text += "\n*(Vazifani bajarish uchun ID raqamini kiriting)*"
+            text += f"🔹 **ID: {t[0]}** — {t[1]}\n"
+        text += "\n*(Vazifani bajarib bo'lgach, ID raqami orqali o'chirishingiz mumkin)*"
         await update.message.reply_text(text, parse_mode="Markdown")
 
-# --- 3. STATISTIKA ---
+# 3. Statistika
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conn = sqlite3.connect('tasks.db')
@@ -121,14 +103,14 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     completed = total - pending
     text = (
-        f"📊 **Sizning statistikalaringiz:**\n\n"
+        f"📊 **Statistika:**\n\n"
         f"📌 Jami vazifalar: `{total}`\n"
         f"⏳ Bajarilishi kerak: `{pending}`\n"
         f"🎉 Bajarilganlar: `{completed}`"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# --- 4. VAZIFANI YANGILASH ---
+# 4. Vazifani yangilash
 async def update_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✏️ Yangilamoqchi bo'lgan vazifangizning **ID raqamini** yuboring:")
     return WAITING_FOR_UPDATE_ID
@@ -147,7 +129,7 @@ async def update_task_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return ConversationHandler.END
         
         context.user_data['update_id'] = task_id
-        await update.message.reply_text(f"📝 Eski vazifa: *{task[0]}*\n\nEndi yangi matnni yuboring:")
+        await update.message.reply_text(f"📝 Eski vazifa: *{task[0]}*\n\nEndi yangi matn va vaqtni yuboring:")
         return WAITING_FOR_UPDATE_TEXT
     except ValueError:
         await update.message.reply_text("❌ Faqat raqam kiriting.")
@@ -166,7 +148,7 @@ async def update_task_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Vazifa muvaffaqiyatli yangilandi!")
     return ConversationHandler.END
 
-# --- 5. BAJARILDI / O'CHIRISH ---
+# 5. Bajarildi / O'chirish
 async def ask_task_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔢 Bajarib bo'lgan vazifangizning **ID raqamini** yuboring:")
     return WAITING_FOR_DONE_ID
@@ -186,7 +168,7 @@ async def remove_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Faqat raqam kiriting.")
     return ConversationHandler.END
 
-# --- 6. HAMMASINI TOZALASH ---
+# 6. Hammasini tozalash
 async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     conn = sqlite3.connect('tasks.db')
@@ -201,18 +183,16 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ----------------- MAIN -----------------
 def run_bot():
-    TOKEN = "8703509119:AAFV0lziPzWSLeGaQoEE_pN8LlNWolshclI"
+    TOKEN = "8703509119:AAFV0lziPzWSLeGaQoEE_pN8LlNWolshclI" # Tokeningizni yozishni unutmang!
     
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Vazifa qo'shish (Kategoriya bilan)
     add_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r"^➕ Vazifa qo'shish$"), add_task_start)],
         states={WAITING_FOR_TASK: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_task)]},
         fallbacks=[CommandHandler("start", cancel)]
     )
 
-    # Vazifani yangilash zanjiri
     update_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r"^✏️ Vazifani yangilash$"), update_task_start)],
         states={
@@ -222,7 +202,6 @@ def run_bot():
         fallbacks=[CommandHandler("start", cancel)]
     )
 
-    # Bajarildi qilish zanjiri
     done_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r"^✅ Bajarildi \(O'chirish\)$"), ask_task_id)],
         states={WAITING_FOR_DONE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, remove_task)]},
@@ -237,10 +216,8 @@ def run_bot():
     app.add_handler(add_conv)
     app.add_handler(update_conv)
     app.add_handler(done_conv)
-    
-    app.add_handler(CallbackQueryHandler(category_callback, pattern=r"^cat_"))
 
-    print("Smart Task Ultimate Bot ishga tushdi...", flush=True)
+    print("Smart Task Bot ishga tushdi...", flush=True)
     app.run_polling(stop_signals=None)
 
 if __name__ == "__main__":
