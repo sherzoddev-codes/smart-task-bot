@@ -5,9 +5,9 @@ import threading
 from datetime import datetime, timedelta
 import pytz
 from flask import Flask
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, filters, 
+    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, 
     ContextTypes, ConversationHandler
 )
 
@@ -38,7 +38,7 @@ def init_db():
 init_db()
 
 # Holatlar
-WAITING_FOR_TASK_TEXT, WAITING_FOR_TASK_TIME, WAITING_FOR_UPDATE_ID, WAITING_FOR_UPDATE_TEXT, WAITING_FOR_DONE_ID, WAITING_FOR_BROADCAST, WAITING_FOR_ADMIN_MESSAGE = range(7)
+WAITING_FOR_TASK_TEXT, WAITING_FOR_TASK_TIME, WAITING_FOR_UPDATE_ID, WAITING_FOR_UPDATE_TEXT, WAITING_FOR_DONE_ID, WAITING_FOR_BROADCAST, WAITING_FOR_ADMIN_MESSAGE, WAITING_FOR_ADMIN_REPLY = range(8)
 MENU_BUTTONS = ["➕ Vazifa qo'shish", "📋 Ro'yxatni ko'rish", "✏️ Vazifani yangilash", "✅ Bajarildi (O'chirish)", "📊 Statistika", "🗑 Hammasini tozalash", "👨‍💻 Adminga xabar yozish", "👑 Admin panel", "📢 Xabar tarqatish", "🔙 Asosiy menyu"]
 
 def is_admin(user):
@@ -54,9 +54,12 @@ def get_main_keyboard(user):
     kb = [
         ["➕ Vazifa qo'shish", "📋 Ro'yxatni ko'rish"], 
         ["✏️ Vazifani yangilash", "✅ Bajarildi (O'chirish)"],
-        ["📊 Statistika", "🗑 Hammasini tozalash"],
-        ["👨‍💻 Adminga xabar yozish"]
+        ["📊 Statistika", "🗑 Hammasini tozalash"]
     ]
+    # Agar foydalanuvchi admin bo'lmasa, "Adminga xabar yozish" tugmasini qo'shamiz
+    if not is_admin(user):
+        kb.append(["👨‍💻 Adminga xabar yozish"])
+    
     if is_admin(user):
         kb.append(["👑 Admin panel"])
     return ReplyKeyboardMarkup(kb, resize_keyboard=True)
@@ -229,12 +232,51 @@ async def contact_admin_send(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ Admin hali botni ishga tushirmagan, xabar yuborib bo'lmaydi.", reply_markup=get_main_keyboard(update.effective_user))
         return ConversationHandler.END
         
-    admin_msg = f"📩 **Yangi xabar!**\n👤 Ism: {update.effective_user.first_name}\n💬 Xabar: {text}"
+    admin_msg = f"📩 **Yangi xabar!**\n👤 Ism: {update.effective_user.first_name}\n🆔 ID: `{user_id}`\n💬 Xabar: {text}"
+    
+    # Admin uchun javob berish va e'tiborsiz qoldirish tugmalari
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💬 Javob yozish", callback_data=f"reply_{user_id}"),
+            InlineKeyboardButton("❌ E'tiborsiz qoldirish", callback_data="ignore")
+        ]
+    ])
+    
     try:
-        await context.bot.send_message(chat_id=admin_id, text=admin_msg, parse_mode="Markdown")
+        await context.bot.send_message(chat_id=admin_id, text=admin_msg, reply_markup=keyboard, parse_mode="Markdown")
         await update.message.reply_text("✅ Xabaringiz adminga muvaffaqiyatli yuborildi!", reply_markup=get_main_keyboard(update.effective_user))
     except Exception:
         await update.message.reply_text("❌ Xatolik yuz berdi.")
+    return ConversationHandler.END
+
+# --- ADMIN JAVOB BERISH VA IGNORE TUGMALARI ---
+async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    if data == "ignore":
+        await query.edit_message_text("❌ Xabar e'tiborsiz qoldirildi.")
+        return ConversationHandler.END
+        
+    if data.startswith("reply_"):
+        target_user_id = int(data.split("_")[1])
+        context.user_data['reply_user_id'] = target_user_id
+        await query.message.reply_text("✍️ Foydalanuvchiga yubormoqchi bo'lgan javobingizni yozing:")
+        return WAITING_FOR_ADMIN_REPLY
+
+async def send_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text in MENU_BUTTONS: return await start(update, context)
+    
+    target_user_id = context.user_data.get('reply_user_id')
+    reply_text = update.message.text
+    
+    try:
+        await context.bot.send_message(chat_id=target_user_id, text=f"👑 **Admin javobi:**\n\n{reply_text}", parse_mode="Markdown")
+        await update.message.reply_text("✅ Javob foydalanuvchiga muvaffaqiyatli yuborildi!", reply_markup=get_main_keyboard(update.effective_user))
+    except Exception:
+        await update.message.reply_text("❌ Foydalanuvchiga xabar yuborib bo'lmadi (botni bloklagan bo'lishi mumkin).", reply_markup=get_main_keyboard(update.effective_user))
+        
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -285,7 +327,9 @@ def run_bot():
     app.add_handler(ConversationHandler(entry_points=[MessageHandler(filters.Regex(r"^✏️ Vazifani yangilash$"), update_task_start)], states={WAITING_FOR_UPDATE_ID: [MessageHandler(filters.TEXT, update_task_get_id)], WAITING_FOR_UPDATE_TEXT: [MessageHandler(filters.TEXT, update_task_save)]}, fallbacks=[CommandHandler("start", cancel)]))
     app.add_handler(ConversationHandler(entry_points=[MessageHandler(filters.Regex(r"^✅ Bajarildi \(O'chirish\)$"), ask_task_id)], states={WAITING_FOR_DONE_ID: [MessageHandler(filters.TEXT, remove_task)]}, fallbacks=[CommandHandler("start", cancel)]))
     app.add_handler(ConversationHandler(entry_points=[MessageHandler(filters.Regex(r"^📢 Xabar tarqatish$"), broadcast_start)], states={WAITING_FOR_BROADCAST: [MessageHandler(filters.TEXT, broadcast_send)]}, fallbacks=[CommandHandler("start", cancel)]))
-    app.add_handler(ConversationHandler(entry_points=[MessageHandler(filters.Regex(r"^👨‍💻 Adminga xabar yozish$"), contact_admin_start)], states={WAITING_FOR_ADMIN_MESSAGE: [MessageHandler(filters.TEXT, contact_admin_send)]}, fallbacks=[CommandHandler("start", cancel)]))
+    app.add_handler(ConversationHandler(entry_points=[MessageHandler(filters.Regex(r"^👨‍💻 Adminga xabar yozish$"), contact_admin_start)], states={WAITING_FOR_ADMIN_MESSAGE: [MessageHandler(filters.TEXT, contact_admin_send)], WAITING_FOR_ADMIN_REPLY: [MessageHandler(filters.TEXT, send_admin_reply)]}, fallbacks=[CommandHandler("start", cancel)]))
+    
+    app.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^(reply_|ignore)"))
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex(r"^📋 Ro'yxatni ko'rish$"), show_tasks))
