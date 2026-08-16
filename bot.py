@@ -41,7 +41,6 @@ def init_db():
             notified_0 INTEGER DEFAULT 0
         )
     ''')
-    # Foydalanuvchilarni saqlash uchun jadval
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY
@@ -52,8 +51,8 @@ def init_db():
 
 init_db()
 
-# O'zingizning Telegram ID raqamingizni shu yerga yozing (masalan: 123456789)
-ADMIN_ID = coder_src  # <--- O'z Telegram ID raqamingizni yozing!
+# Adminning Telegram usernami
+ADMIN_USERNAME = "coder_src"
 
 # Holatlar
 WAITING_FOR_TASK = 1
@@ -91,7 +90,6 @@ def check_reminders():
         return
 
     now = datetime.now()
-    current_time_str = now.strftime("%H:%M")
     current_hour = now.hour
     current_minute = now.minute
     current_total_minutes = current_hour * 60 + current_minute
@@ -135,8 +133,8 @@ def register_user(user_id):
 
 # --- BOT MENYUSI ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    register_user(user_id)
+    user = update.effective_user
+    register_user(user.id)
 
     kb = [
         ["➕ Vazifa qo'shish", "📋 Ro'yxatni ko'rish"], 
@@ -144,8 +142,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ["📊 Statistika", "🗑 Hammasini tozalash"]
     ]
     
-    # Agar foydalanuvchi Admin bo'lsa, panel tugmasini qo'shamiz
-    if user_id == ADMIN_ID:
+    if user.username and f"@{user.username.lower()}" == f"@{ADMIN_USERNAME.lower()}":
         kb.append(["👑 Admin panel"])
 
     await update.message.reply_text(
@@ -163,8 +160,10 @@ async def add_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    
+    # Agar foydalanuvchi boshqa menyu tugmasini bosib yuborsa
     if text in MENU_BUTTONS:
-        await update.message.reply_text("⚠️ Vazifa kiritish bekor qilindi.")
+        await update.message.reply_text("⚠️ Vazifa kiritish to'xtatildi.")
         return ConversationHandler.END
 
     user_id = update.effective_user.id
@@ -268,7 +267,7 @@ async def ask_task_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔢 Bajarib bo'lgan vazifangizning **ID raqamini** yuboring:")
     return WAITING_FOR_DONE_ID
 
-async def remove_path(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def remove_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text in MENU_BUTTONS:
         await update.message.reply_text("⚠️ Amaliyot bekor qilindi.")
@@ -299,7 +298,8 @@ async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- ADMIN PANEL ---
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    user = update.effective_user
+    if not user.username or f"@{user.username.lower()}" != f"@{ADMIN_USERNAME.lower()}":
         return
 
     conn = sqlite3.connect('tasks.db')
@@ -323,7 +323,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- XABAR TARQATISH (BROADCAST) ---
 async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    user = update.effective_user
+    if not user.username or f"@{user.username.lower()}" != f"@{ADMIN_USERNAME.lower()}":
         return
     await update.message.reply_text("📢 Barcha foydalanuvchilarga yubormoqchi bo'lgan xabaringizni yuboring:")
     return WAITING_FOR_BROADCAST
@@ -366,8 +367,13 @@ def run_bot():
 
     add_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r"^➕ Vazifa qo'shish$"), add_task_start)],
-        states={WAITING_FOR_TASK: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_task)]},
-        fallbacks=[CommandHandler("start", cancel)]
+        states={
+            WAITING_FOR_TASK: [
+                MessageHandler(filters.Regex(r"^➕ Vazifa qo'shish$"), add_task_start),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, save_task)
+            ]
+        },
+        fallbacks=[CommandHandler("start", cancel), MessageHandler(filters.Regex(r"^🔙 Asosiy menyu$"), cancel)]
     )
 
     update_conv = ConversationHandler(
@@ -381,7 +387,7 @@ def run_bot():
 
     done_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r"^✅ Bajarildi \(O'chirish\)$"), ask_task_id)],
-        states={WAITING_FOR_DONE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, remove_path)]},
+        states={WAITING_FOR_DONE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, remove_task)]},
         fallbacks=[CommandHandler("start", cancel)]
     )
 
@@ -403,7 +409,7 @@ def run_bot():
     app.add_handler(done_conv)
     app.add_handler(broadcast_conv)
 
-    print("Smart Task Bot Admin panel bilan ishga tushdi...", flush=True)
+    print("Smart Task Bot to'g'irlandi va ishga tushdi...", flush=True)
     app.run_polling(stop_signals=None)
 
 if __name__ == "__main__":
