@@ -56,7 +56,6 @@ def get_main_keyboard(user):
         ["✏️ Vazifani yangilash", "✅ Bajarildi (O'chirish)"],
         ["📊 Statistika", "🗑 Hammasini tozalash"]
     ]
-    # Agar foydalanuvchi admin bo'lmasa, "Adminga xabar yozish" tugmasini qo'shamiz
     if not is_admin(user):
         kb.append(["👨‍💻 Adminga xabar yozish"])
     
@@ -234,7 +233,6 @@ async def contact_admin_send(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
     admin_msg = f"📩 **Yangi xabar!**\n👤 Ism: {update.effective_user.first_name}\n🆔 ID: `{user_id}`\n💬 Xabar: {text}"
     
-    # Admin uchun javob berish va e'tiborsiz qoldirish tugmalari
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("💬 Javob yozish", callback_data=f"reply_{user_id}"),
@@ -257,7 +255,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     data = query.data
     if data == "ignore":
         await query.edit_message_text("❌ Xabar e'tiborsiz qoldirildi.")
-        return ConversationHandler.END
+        return
         
     if data.startswith("reply_"):
         target_user_id = int(data.split("_")[1])
@@ -327,9 +325,20 @@ def run_bot():
     app.add_handler(ConversationHandler(entry_points=[MessageHandler(filters.Regex(r"^✏️ Vazifani yangilash$"), update_task_start)], states={WAITING_FOR_UPDATE_ID: [MessageHandler(filters.TEXT, update_task_get_id)], WAITING_FOR_UPDATE_TEXT: [MessageHandler(filters.TEXT, update_task_save)]}, fallbacks=[CommandHandler("start", cancel)]))
     app.add_handler(ConversationHandler(entry_points=[MessageHandler(filters.Regex(r"^✅ Bajarildi \(O'chirish\)$"), ask_task_id)], states={WAITING_FOR_DONE_ID: [MessageHandler(filters.TEXT, remove_task)]}, fallbacks=[CommandHandler("start", cancel)]))
     app.add_handler(ConversationHandler(entry_points=[MessageHandler(filters.Regex(r"^📢 Xabar tarqatish$"), broadcast_start)], states={WAITING_FOR_BROADCAST: [MessageHandler(filters.TEXT, broadcast_send)]}, fallbacks=[CommandHandler("start", cancel)]))
-    app.add_handler(ConversationHandler(entry_points=[MessageHandler(filters.Regex(r"^👨‍💻 Adminga xabar yozish$"), contact_admin_start)], states={WAITING_FOR_ADMIN_MESSAGE: [MessageHandler(filters.TEXT, contact_admin_send)], WAITING_FOR_ADMIN_REPLY: [MessageHandler(filters.TEXT, send_admin_reply)]}, fallbacks=[CommandHandler("start", cancel)]))
     
-    app.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^(reply_|ignore)"))
+    # Admin javob berishi uchun ConversationHandler
+    app.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_callback_handler, pattern="^reply_")],
+        states={
+            WAITING_FOR_ADMIN_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, send_admin_reply)]
+        },
+        fallbacks=[CommandHandler("start", cancel)]
+    ))
+
+    # Oddiy ignore tugmasi uchun handler
+    app.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^ignore$"))
+
+    app.add_handler(ConversationHandler(entry_points=[MessageHandler(filters.Regex(r"^👨‍💻 Adminga xabar yozish$"), contact_admin_start)], states={WAITING_FOR_ADMIN_MESSAGE: [MessageHandler(filters.TEXT, contact_admin_send)]}, fallbacks=[CommandHandler("start", cancel)]))
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex(r"^📋 Ro'yxatni ko'rish$"), show_tasks))
