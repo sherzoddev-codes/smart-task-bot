@@ -12,7 +12,7 @@ from telegram.ext import (
 )
 
 # --- SOZLAMALAR ---
-ADMIN_USERNAME = "coder_src"  # Sizning usernameingiz (shu bo'yicha bot sizni taniydi)
+ADMIN_USERNAME = "coder_src"
 TASHKENT_TZ = pytz.timezone('Asia/Tashkent')
 
 # --- FLASK (Render uchun veb-server) ---
@@ -41,7 +41,6 @@ init_db()
 WAITING_FOR_TASK_TEXT, WAITING_FOR_TASK_TIME, WAITING_FOR_UPDATE_ID, WAITING_FOR_UPDATE_TEXT, WAITING_FOR_DONE_ID, WAITING_FOR_BROADCAST, WAITING_FOR_ADMIN_MESSAGE = range(7)
 MENU_BUTTONS = ["➕ Vazifa qo'shish", "📋 Ro'yxatni ko'rish", "✏️ Vazifani yangilash", "✅ Bajarildi (O'chirish)", "📊 Statistika", "🗑 Hammasini tozalash", "👨‍💻 Adminga xabar yozish", "👑 Admin panel", "📢 Xabar tarqatish", "🔙 Asosiy menyu"]
 
-# --- YORDAMCHI FUNKSIYALAR ---
 def is_admin(user):
     return user.username and user.username.lower() == ADMIN_USERNAME.lower()
 
@@ -62,7 +61,7 @@ def get_main_keyboard(user):
         kb.append(["👑 Admin panel"])
     return ReplyKeyboardMarkup(kb, resize_keyboard=True)
 
-# --- ESLATMALARNI TEKSHIRISH (Yangi usul - JobQueue) ---
+# --- ESLATMALARNI TEKSHIRISH ---
 async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(TASHKENT_TZ)
     time_now = now.strftime('%H:%M')
@@ -109,7 +108,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard(user), parse_mode="Markdown")
     return ConversationHandler.END
 
-# QOLGAN BARCHA FUNKSIYALAR
 async def add_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📝 **1-qadam:** Vazifa nomini yozing (Masalan: Kitob o'qish):", reply_markup=ReplyKeyboardMarkup([["🔙 Asosiy menyu"]], resize_keyboard=True))
     return WAITING_FOR_TASK_TEXT
@@ -194,21 +192,49 @@ async def broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Xabar hammaga yuborildi!", reply_markup=get_main_keyboard(update.effective_user))
     return ConversationHandler.END
 
+# --- ADMIN BILAN BOG'LANISH (24 soatlik 2 ta xabar limiti bilan) ---
 async def contact_admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✍️ Adminga xabaringizni yozing:", reply_markup=ReplyKeyboardMarkup([["🔙 Asosiy menyu"]], resize_keyboard=True))
+    user_id = update.effective_user.id
+    
+    conn = sqlite3.connect('tasks.db')
+    cursor = conn.cursor()
+    # So'nggi 24 soat ichida yuborgan xabarlarini sanaymiz
+    cursor.execute("SELECT COUNT(*) FROM messages_to_admin WHERE user_id = ? AND sent_at >= datetime('now', '-1 day')", (user_id,))
+    msg_count = cursor.fetchone()[0]
+    conn.close()
+    
+    if msg_count >= 2:
+        await update.message.reply_text(
+            "⚠️ **Xabar yuborish limiti tugadi!**\n\nSiz 24 soat ichida eng ko'pi bilan 2 ta xabar yoza olasiz. Iltimos, keyinroq yana urinib ko'ring.",
+            reply_markup=get_main_keyboard(update.effective_user),
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+
+    await update.message.reply_text("✍️ Adminga xabaringizni yozing (Limit: 24 soatda 2 ta):", reply_markup=ReplyKeyboardMarkup([["🔙 Asosiy menyu"]], resize_keyboard=True))
     return WAITING_FOR_ADMIN_MESSAGE
 
 async def contact_admin_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text in MENU_BUTTONS: return await start(update, context)
+    
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    # Bazaga xabarni yozib qo'shamiz (limitni hisoblash uchun)
+    conn = sqlite3.connect('tasks.db')
+    conn.execute("INSERT INTO messages_to_admin (user_id, message_text) VALUES (?, ?)", (user_id, text))
+    conn.commit()
+    conn.close()
+
     admin_id = get_admin_id()
     if not admin_id:
         await update.message.reply_text("❌ Admin hali botni ishga tushirmagan, xabar yuborib bo'lmaydi.", reply_markup=get_main_keyboard(update.effective_user))
         return ConversationHandler.END
         
-    admin_msg = f"📩 **Yangi xabar!**\n👤 Ism: {update.effective_user.first_name}\n💬 Xabar: {update.message.text}"
+    admin_msg = f"📩 **Yangi xabar!**\n👤 Ism: {update.effective_user.first_name}\n💬 Xabar: {text}"
     try:
         await context.bot.send_message(chat_id=admin_id, text=admin_msg, parse_mode="Markdown")
-        await update.message.reply_text("✅ Xabaringiz yuborildi!", reply_markup=get_main_keyboard(update.effective_user))
+        await update.message.reply_text("✅ Xabaringiz adminga muvaffaqiyatli yuborildi!", reply_markup=get_main_keyboard(update.effective_user))
     except Exception:
         await update.message.reply_text("❌ Xatolik yuz berdi.")
     return ConversationHandler.END
@@ -252,10 +278,9 @@ async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🗑 Barcha vazifalar tozalandi.")
 
 def run_bot():
-    TOKEN = "8703509119:AAFV0lziPzWSLeGaQoEE_pN8LlNWolshclI" # <--- TOKENNI O'ZINGIZNIKIGA ALMASHTIRING!
+    TOKEN = "8703509119:AAFV0lziPzWSLeGaQoEE_pN8LlNWolshclI" # <--- TOKENINGIZNI YOZING!
     app = ApplicationBuilder().token(TOKEN).build()
     
-    # 🌟 MANA SHU YERDA VAQT NAZORATI ISHLAYDI (har 60 soniyada)
     app.job_queue.run_repeating(check_reminders, interval=60, first=5)
 
     app.add_handler(ConversationHandler(entry_points=[MessageHandler(filters.Regex(r"^➕ Vazifa qo'shish$"), add_task_start)], states={WAITING_FOR_TASK_TEXT: [MessageHandler(filters.TEXT, add_task_text)], WAITING_FOR_TASK_TIME: [MessageHandler(filters.TEXT, add_task_time)]}, fallbacks=[CommandHandler("start", cancel)]))
