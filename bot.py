@@ -1,8 +1,10 @@
 import os
+import re
 import sqlite3
 import threading
+from datetime import datetime
 from flask import Flask
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -11,6 +13,7 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler,
 )
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # --- FLASK (Render uchun veb-server) ---
 web_app = Flask(__name__)
@@ -31,7 +34,17 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT, 
             user_id INTEGER, 
             task TEXT, 
-            status TEXT
+            task_time TEXT,
+            status TEXT,
+            notified_10 INTEGER DEFAULT 0,
+            notified_5 INTEGER DEFAULT 0,
+            notified_0 INTEGER DEFAULT 0
+        )
+    ''')
+    # Foydalanuvchilarni saqlash uchun jadval
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY
         )
     ''')
     conn.commit()
@@ -39,42 +52,134 @@ def init_db():
 
 init_db()
 
+# O'zingizning Telegram ID raqamingizni shu yerga yozing (masalan: 123456789)
+ADMIN_ID = coder_src  # <--- O'z Telegram ID raqamingizni yozing!
+
 # Holatlar
 WAITING_FOR_TASK = 1
 WAITING_FOR_UPDATE_ID = 2
 WAITING_FOR_UPDATE_TEXT = 3
 WAITING_FOR_DONE_ID = 4
+WAITING_FOR_BROADCAST = 5
+
+MENU_BUTTONS = [
+    "➕ Vazifa qo'shish", 
+    "📋 Ro'yxatni ko'rish", 
+    "✏️ Vazifani yangilash", 
+    "✅ Bajarildi (O'chirish)",
+    "📊 Statistika", 
+    "🗑 Hammasini tozalash",
+    "👑 Admin panel",
+    "📢 Xabar tarqatish"
+]
+
+bot_app_instance = None
+
+# --- VAZIFA VAQTINI AJRATIB OLISH ---
+def extract_time(text):
+    match = re.search(r'(\d{1,2}):(\d{2})', text)
+    if match:
+        hours = match.group(1).zfill(2)
+        minutes = match.group(2)
+        return f"{hours}:{minutes}"
+    return None
+
+# --- FONDA ESLATISH ---
+def check_reminders():
+    global bot_app_instance
+    if not bot_app_instance:
+        return
+
+    now = datetime.now()
+    current_time_str = now.strftime("%H:%M")
+    current_hour = now.hour
+    current_minute = now.minute
+    current_total_minutes = current_hour * 60 + current_minute
+
+    conn = sqlite3.connect('tasks.db')
+    cursor = conn.cursor()
+    tasks = cursor.execute(
+        "SELECT id, user_id, task, task_time, notified_10, notified_5, notified_0 FROM tasks WHERE status = 'pending' AND task_time IS NOT NULL"
+    ).fetchall()
+
+    for t in tasks:
+        task_id, user_id, task_text, task_time, n10, n5, n0 = t
+        try:
+            t_hour, t_min = map(int, task_time.split(':'))
+            task_total_minutes = t_hour * 60 + t_min
+            diff = task_total_minutes - current_total_minutes
+
+            if diff == 10 and not n10:
+                bot_app_instance.bot.send_message(chat_id=user_id, text=f"⏰ **Eslatma!**\n\n\"{task_text}\" vazifasiga **10 daqiqa** qoldi!")
+                cursor.execute("UPDATE tasks SET notified_10 = 1 WHERE id = ?", (task_id,))
+                conn.commit()
+            elif diff == 5 and not n5:
+                bot_app_instance.bot.send_message(chat_id=user_id, text=f"⚠️ **Tezroq bo'ling!**\n\n\"{task_text}\" vazifasiga **5 daqiqa** qoldi!")
+                cursor.execute("UPDATE tasks SET notified_5 = 1 WHERE id = ?", (task_id,))
+                conn.commit()
+            elif diff == 0 and not n0:
+                bot_app_instance.bot.send_message(chat_id=user_id, text=f"🚨 **Vaqt bo'ldi!**\n\n\"{task_text}\" vaqti keldi!")
+                cursor.execute("UPDATE tasks SET notified_0 = 1 WHERE id = ?", (task_id,))
+                conn.commit()
+        except Exception as e:
+            print(f"Xatolik: {e}")
+    conn.close()
+
+# --- FOYDALANUVCHINI BAZAGA QO'SHISH ---
+def register_user(user_id):
+    conn = sqlite3.connect('tasks.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+    conn.commit()
+    conn.close()
 
 # --- BOT MENYUSI ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    register_user(user_id)
+
     kb = [
         ["➕ Vazifa qo'shish", "📋 Ro'yxatni ko'rish"], 
         ["✏️ Vazifani yangilash", "✅ Bajarildi (O'chirish)"],
         ["📊 Statistika", "🗑 Hammasini tozalash"]
     ]
+    
+    # Agar foydalanuvchi Admin bo'lsa, panel tugmasini qo'shamiz
+    if user_id == ADMIN_ID:
+        kb.append(["👑 Admin panel"])
+
     await update.message.reply_text(
         "👋 **Smart Task Bot**ga xush kelibsiz!\n"
-        "Vazifangizni va vaqtini erkin yozib qoldirishingiz mumkin.", 
+        "Vazifangizni va vaqtini erkin yozib qoldirishingiz mumkin (masalan: *Dasturlash 15:00*).", 
         reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True),
         parse_mode="Markdown"
     )
     return ConversationHandler.END
 
-# 1. Vazifa qo'shish (Erkin matn va vaqt)
+# 1. Vazifa qo'shish
 async def add_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📝 Vazifangiz va vaqtini yozib yuboring\n*(Masalan: Dasturlash 17:00 da yoki Ingliz tili soat 19:00)*:")
+    await update.message.reply_text("📝 Vazifangiz va vaqtini yozib yuboring\n*(Masalan: Dasturlash 15:00)*:")
     return WAITING_FOR_TASK
 
 async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    task_text = update.message.text
+    text = update.message.text
+    if text in MENU_BUTTONS:
+        await update.message.reply_text("⚠️ Vazifa kiritish bekor qilindi.")
+        return ConversationHandler.END
+
     user_id = update.effective_user.id
+    extracted_time = extract_time(text)
     
     conn = sqlite3.connect('tasks.db')
-    conn.execute("INSERT INTO tasks (user_id, task, status) VALUES (?, ?, ?)", (user_id, task_text, "pending"))
+    conn.execute("INSERT INTO tasks (user_id, task, task_time, status) VALUES (?, ?, ?, ?)", (user_id, text, extracted_time, "pending"))
     conn.commit()
     conn.close()
     
-    await update.message.reply_text("✅ Vazifa muvaffaqiyatli ro'yxatga qo'shildi!")
+    msg = "✅ Vazifa muvaffaqiyatli ro'yxatga qo'shildi!"
+    if extracted_time:
+        msg += f"\n⏰ Eslatma vaqti belgilandi: **{extracted_time}**"
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
     return ConversationHandler.END
 
 # 2. Ro'yxatni ko'rish
@@ -116,8 +221,13 @@ async def update_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_FOR_UPDATE_ID
 
 async def update_task_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text in MENU_BUTTONS:
+        await update.message.reply_text("⚠️ Amaliyot bekor qilindi.")
+        return ConversationHandler.END
+
     try:
-        task_id = int(update.message.text)
+        task_id = int(text)
         user_id = update.effective_user.id
         
         conn = sqlite3.connect('tasks.db')
@@ -137,11 +247,16 @@ async def update_task_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def update_task_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_text = update.message.text
+    if new_text in MENU_BUTTONS:
+        await update.message.reply_text("⚠️ Amaliyot bekor qilindi.")
+        return ConversationHandler.END
+
     task_id = context.user_data.get('update_id')
     user_id = update.effective_user.id
+    extracted_time = extract_time(new_text)
     
     conn = sqlite3.connect('tasks.db')
-    conn.execute("UPDATE tasks SET task = ? WHERE id = ? AND user_id = ?", (new_text, task_id, user_id))
+    conn.execute("UPDATE tasks SET task = ?, task_time = ?, notified_10 = 0, notified_5 = 0, notified_0 = 0 WHERE id = ? AND user_id = ?", (new_text, extracted_time, task_id, user_id))
     conn.commit()
     conn.close()
     
@@ -153,9 +268,14 @@ async def ask_task_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔢 Bajarib bo'lgan vazifangizning **ID raqamini** yuboring:")
     return WAITING_FOR_DONE_ID
 
-async def remove_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def remove_path(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text in MENU_BUTTONS:
+        await update.message.reply_text("⚠️ Amaliyot bekor qilindi.")
+        return ConversationHandler.END
+
     try:
-        task_id = int(update.message.text)
+        task_id = int(text)
         user_id = update.effective_user.id
         
         conn = sqlite3.connect('tasks.db')
@@ -177,15 +297,72 @@ async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     await update.message.reply_text("🗑 Barcha vazifalaringiz tozalandi.")
 
+# --- ADMIN PANEL ---
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    conn = sqlite3.connect('tasks.db')
+    total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    total_tasks = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    pending_tasks = conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'pending'").fetchone()[0]
+    conn.close()
+
+    admin_kb = [
+        ["📢 Xabar tarqatish"],
+        ["🔙 Asosiy menyu"]
+    ]
+
+    text = (
+        f"👑 **Admin Boshqaruv Paneli**\n\n"
+        f"👥 Jami foydalanuvchilar: `{total_users}`\n"
+        f"📌 Jami vazifalar: `{total_tasks}`\n"
+        f"⏳ Bajarilishi kerak bo'lganlar: `{pending_tasks}`"
+    )
+    await update.message.reply_text(text, reply_markup=ReplyKeyboardMarkup(admin_kb, resize_keyboard=True), parse_mode="Markdown")
+
+# --- XABAR TARQATISH (BROADCAST) ---
+async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    await update.message.reply_text("📢 Barcha foydalanuvchilarga yubormoqchi bo'lgan xabaringizni yuboring:")
+    return WAITING_FOR_BROADCAST
+
+async def broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "🔙 Asosiy menyu":
+        return await start(update, context)
+
+    conn = sqlite3.connect('tasks.db')
+    users = conn.execute("SELECT user_id FROM users").fetchall()
+    conn.close()
+
+    success = 0
+    for u in users:
+        try:
+            await context.bot.send_message(chat_id=u[0], text=f"📢 **E'lon:**\n\n{text}", parse_mode="Markdown")
+            success += 1
+        except Exception:
+            pass
+
+    await update.message.reply_text(f"✅ Xabar muvaffaqiyatli **{success}** ta foydalanuvchiga yuborildi!")
+    return await admin_panel(update, context)
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
     return ConversationHandler.END
 
 # ----------------- MAIN -----------------
 def run_bot():
-    TOKEN = "8703509119:AAFV0lziPzWSLeGaQoEE_pN8LlNWolshclI" # Tokeningizni yozishni unutmang!
+    global bot_app_instance
+    TOKEN = "8703509119:AAFV0lziPzWSLeGaQoEE_pN8LlNWolshclI"
     
     app = ApplicationBuilder().token(TOKEN).build()
+    bot_app_instance = app
+
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(check_reminders, 'interval', minutes=1)
+    scheduler.start()
 
     add_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r"^➕ Vazifa qo'shish$"), add_task_start)],
@@ -204,7 +381,13 @@ def run_bot():
 
     done_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r"^✅ Bajarildi \(O'chirish\)$"), ask_task_id)],
-        states={WAITING_FOR_DONE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, remove_task)]},
+        states={WAITING_FOR_DONE_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, remove_path)]},
+        fallbacks=[CommandHandler("start", cancel)]
+    )
+
+    broadcast_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(r"^📢 Xabar tarqatish$"), broadcast_start)],
+        states={WAITING_FOR_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_send)]},
         fallbacks=[CommandHandler("start", cancel)]
     )
 
@@ -212,12 +395,15 @@ def run_bot():
     app.add_handler(MessageHandler(filters.Regex(r"^📋 Ro'yxatni ko'rish$"), show_tasks))
     app.add_handler(MessageHandler(filters.Regex(r"^📊 Statistika$"), show_stats))
     app.add_handler(MessageHandler(filters.Regex(r"^🗑 Hammasini tozalash$"), clear_all))
+    app.add_handler(MessageHandler(filters.Regex(r"^👑 Admin panel$"), admin_panel))
+    app.add_handler(MessageHandler(filters.Regex(r"^🔙 Asosiy menyu$"), start))
     
     app.add_handler(add_conv)
     app.add_handler(update_conv)
     app.add_handler(done_conv)
+    app.add_handler(broadcast_conv)
 
-    print("Smart Task Bot ishga tushdi...", flush=True)
+    print("Smart Task Bot Admin panel bilan ishga tushdi...", flush=True)
     app.run_polling(stop_signals=None)
 
 if __name__ == "__main__":
