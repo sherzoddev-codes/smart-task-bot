@@ -198,7 +198,6 @@ async def contact_admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     conn = sqlite3.connect('tasks.db')
     cursor = conn.cursor()
-    # So'nggi 24 soat ichida yuborgan xabarlarini sanaymiz
     cursor.execute("SELECT COUNT(*) FROM messages_to_admin WHERE user_id = ? AND sent_at >= datetime('now', '-1 day')", (user_id,))
     msg_count = cursor.fetchone()[0]
     conn.close()
@@ -220,7 +219,6 @@ async def contact_admin_send(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = update.effective_user.id
     text = update.message.text
     
-    # Bazaga xabarni yozib qo'shamiz (limitni hisoblash uchun)
     conn = sqlite3.connect('tasks.db')
     conn.execute("INSERT INTO messages_to_admin (user_id, message_text) VALUES (?, ?)", (user_id, text))
     conn.commit()
@@ -278,7 +276,7 @@ async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🗑 Barcha vazifalar tozalandi.")
 
 def run_bot():
-    TOKEN = "8703509119:AAFV0lziPzWSLeGaQoEE_pN8LlNWolshclI" # <--- TOKENINGIZNI YOZING!
+    TOKEN = "8703509119:AAFV0lziPzWSLeGaQoEE_pN8LlNWolshclI"
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.job_queue.run_repeating(check_reminders, interval=60, first=5)
@@ -296,7 +294,7 @@ def run_bot():
     app.add_handler(MessageHandler(filters.Regex(r"^👑 Admin panel$"), admin_panel))
     app.add_handler(MessageHandler(filters.Regex(r"^🔙 Asosiy menyu$"), start))
     
-    app.run_polling(stop_signals=None)
+    app.run_polling(stop_signals=None, drop_pending_updates=True)
 
 if __name__ == "__main__":
     bot_thread = threading.Thread(target=run_bot, daemon=True)
